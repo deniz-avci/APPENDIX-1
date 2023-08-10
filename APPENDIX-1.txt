@@ -1,0 +1,1185 @@
+Tx unit:
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tx is 
+    generic (
+        clks_per_bit : integer := 1737 --bittimerlimit  calibrated with 200Mhz / 115200 = 1736.8 ~~1737
+    );
+    port(
+        clk: in std_logic;
+        data_in: in std_logic_vector (7 downto 0);
+        start_transmit : in std_logic;
+        transmit_out : out std_logic;
+        tx_busy : out std_logic
+    );
+end entity;
+
+architecture behavior of tx is
+
+    type statetype is (idle,start,data,stop);
+    signal state: statetype := idle;
+    
+    signal bit_counter : integer range 0 to 7 := 0;
+    signal sh_reg : std_logic_vector (7 downto 0) := (others =>'0');
+    signal bit_timer : integer range 0 to clks_per_bit := 0;
+    
+    
+    begin 
+        state_process: process(clk)
+        begin
+            if rising_edge(clk)then 
+                case state is
+                    when idle =>
+                        tx_busy <= '0';
+                        transmit_out <= '1';
+                        bit_counter <= 0;
+                        
+                        if(start_transmit = '1') then
+                            state <= start;
+                            tx_busy <= '1';
+                            transmit_out <= '0';
+                            sh_reg <= data_in;
+                        end if;
+                    
+                    when start =>
+                        if(bit_timer = clks_per_bit -1) then
+                            state<= data;
+                            transmit_out  <= sh_reg (0);
+                            sh_reg <= sh_reg(0) & sh_reg (7 downto 1);
+                            bit_timer <= 0;
+                        else
+                            bit_timer <= bit_timer +1;
+                        end if;
+                        
+                        
+                    when data => 
+                        if(bit_counter = 7) then
+                            if(bit_timer = clks_per_bit -1) then
+                                bit_counter <= 0;
+                                state <= stop;
+                                transmit_out <= '1';
+                                bit_timer <= 0;
+                            else
+                                bit_timer <= bit_timer +1;
+                            end if;
+                        else
+                            if(bit_timer = clks_per_bit -1) then
+                                transmit_out <= sh_reg(0);
+                                sh_reg <= sh_reg(0) & sh_reg (7 downto 1);
+                                bit_counter <= bit_counter +1;
+                                bit_timer <= 0;
+                            else
+                                bit_timer <= bit_timer +1;
+                            end if;
+                        end if;
+                        
+                    when stop =>
+                        if(bit_timer = clks_per_bit -1) then
+                            transmit_out <= '1'; -- does not change anything...
+                            state<= idle;
+                            bit_timer <= 0;
+                        else
+                            bit_timer <= bit_timer +1;
+                        end if;
+                    end case;
+                end if;
+            end process;
+        end architecture;
+                    
+
+Rx Unit:
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+
+entity rx is
+    generic(
+        clks_per_bit : integer := 1737
+    );
+    port(
+        clk : in std_logic;
+        receiver_input : in std_logic;
+        receiver_output : out std_logic_vector(7 downto 0);
+        receiver_finish: out std_logic
+    );
+end entity;
+
+
+architecture behavior of rx is
+    type statetype is (idle,start,data,stop);
+    signal state: statetype := idle;
+    signal bit_timer : integer range 0 to clks_per_bit := 0;
+    signal bit_counter : integer range 0 to 7 := 0;
+    signal sh_reg : std_logic_vector (7 downto 0) := (others =>'0');
+    
+    
+    begin
+        process (clk)
+        begin
+            if rising_edge(clk) then
+                case state is
+                    when idle =>
+                        receiver_finish <= '0';
+                        bit_timer <= 0;
+                        if (receiver_input = '0') then
+                            state<= start;
+                        end if;
+                        
+                    when start =>
+                        if(bit_timer = clks_per_bit -1) then
+                            state <= data;
+                            sh_reg <= receiver_input & sh_reg(7 downto 1);
+                            bit_timer <= 0;
+                        else
+                            bit_timer <= bit_timer +1;
+                        end if;
+                    
+                    
+                    when data =>
+                        if(bit_counter = 7) then
+                            if(bit_timer = clks_per_bit -1)then
+                                state <= stop;
+                                bit_timer <= 0;
+                                bit_counter <= 0;
+                            else
+                                bit_timer <= bit_timer +1;
+                            end if;
+                        else
+                            if(bit_timer = clks_per_bit -1) then
+                                bit_counter <= bit_counter +1;
+                                bit_timer <= 0;
+                                sh_reg <= receiver_input & sh_reg(7 downto 1);
+                             else
+                                bit_timer <= bit_timer +1;
+                             end if;
+                         end if;
+                     
+                     when stop =>
+                        if(bit_timer = clks_per_bit -1) then
+                            state <= idle;
+                            receiver_finish <= '1';
+                            bit_timer <= 0;
+                        else
+                            bit_timer <= bit_timer + 1;
+                        end if;
+                    end case;
+                end if;
+            end process;
+        receiver_output <= sh_reg;
+end architecture;
+
+
+UART TOP:
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+
+
+entity top is
+generic(
+    clks_per_bit : integer := 1737
+);
+
+port (
+    clk: in std_logic;
+    data_in : in std_logic;
+    data_out : out std_logic;
+    tx_busy : out std_logic
+);
+
+end entity;
+
+
+architecture behavior of top is 
+
+    signal tx_serial_output : std_logic := '0';
+    signal rx_parallel_output : std_logic_vector (7 downto 0) := (others =>'0');
+    signal serial_output : std_logic := '0';
+    signal tx_busy_wire : std_logic;
+    signal receiver_finish : std_logic;
+    
+begin
+    receiver: entity work.rx(behavior) port map(
+        clk => clk,
+        receiver_input => data_in,
+        receiver_output => rx_parallel_output,
+        receiver_finish => receiver_finish
+    );
+    
+    transmitter : entity work.tx(behavior) port map(
+        clk => clk,
+        data_in => rx_parallel_output,
+        start_transmit => receiver_finish,
+        transmit_out => serial_output,
+        tx_busy => tx_busy_wire
+    );
+    
+    data_out <= serial_output;
+    tx_busy <= tx_busy_wire;
+    
+    end architecture;
+        
+        
+        
+MUX:
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+
+
+
+entity selector is port (
+    data_in1: in std_logic;
+    data_in2: in std_logic;
+    asci_or_pc: in std_logic;
+    data_out : out std_logic
+);
+end entity;
+
+
+architecture behavior of selector is
+
+    begin
+        process (data_in1,data_in2,asci_or_pc)
+            begin
+                if (asci_or_pc = '0') then
+                    data_out <= data_in1;
+                else
+                    data_out <= data_in2;
+                end if;
+            end process;
+    end architecture;
+    
+
+MESSAGE MODULE:
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+
+
+entity menu_trial is port(
+    clk : in std_logic;
+    ask_inp,ask_inp1,ask_inp2: in std_logic;
+    busy: in std_logic;
+    transmit: out std_logic;
+    stop_check: out std_logic;
+    ascii_out : out std_logic_vector (7 downto 0)
+);
+end entity;
+
+
+
+architecture behavior of menu_trial is 
+    type statetype is (check,send,count,stop);
+    type chars is array (0 to 6) of std_logic_vector (7 downto 0);
+    signal state : statetype := check;
+    signal first_msg : chars := (x"66",x"69",x"72",x"73",x"74",x"20",x"20");
+    signal second_msg : chars := (x"73",x"65",x"63",x"6F",x"6E",x"64",x"20");
+    signal third_msg : chars := (x"6F",x"70",x"72",x"74",x"6E",x"20",x"20");
+    signal counter : integer := 0;
+    --signal busy_reg: std_logic := '0';
+    begin
+    
+        process(clk)
+            begin
+                if rising_edge(clk) then
+                if (ask_inp ='1')then
+                    --busy_reg <= '0';
+                    case state is 
+                        when check =>
+                            stop_check <= '0';
+                            if(busy /= '1') then--and --busy_reg /= '1') then
+                                if(ask_inp1 = '1' and ask_inp2 = '0')then
+                                    ascii_out <= first_msg(counter);
+                                elsif (ask_inp1 = '0' and ask_inp2 = '1') then
+                                    ascii_out <= second_msg(counter);
+                                else
+                                    ascii_out <= third_msg(counter);
+                                end if;
+                            state <= send;
+                            end if;
+                        when send =>
+                                transmit <= '1';
+                                state <= count; 
+                        when count => 
+                            transmit <= '0';
+                            if(counter = 6) then
+                                
+                                counter <= 0;
+                                state <= stop;
+                            else
+                                counter <= counter +1;
+                                state <= check;
+                            end if;    
+                            
+                        when stop =>
+                            --busy_reg <= '1';
+                            stop_check <= '1';
+                            state <= check;
+
+                     end case;
+                     end if;
+                 end if;
+             end process;
+                                
+                            
+                            
+    
+   end architecture;    library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+------Defined the library and usefull properties from those libraries that will be helpfull with design process.
+------Starting with defining the entity and ports of the entity.
+entity Counter is port (
+    Clock,Reset,Enable,Load,Up_Down: in std_logic;
+    Data : in std_logic_vector (7 downto 0);
+    Q: out std_logic_vector (7 downto 0)
+    );
+end entity;
+---------------How will the entity work is declared in architecture part
+architecture behavior of Counter is       
+    signal counter : unsigned (7 downto 0);
+    begin
+    process(Clock,Reset) --this part defines the sensitivity (with which changes the process start)
+    begin
+        if Reset = '1' then
+            counter <= (others=> '0');
+        end if;
+        
+        if rising_edge(Clock) then
+            if Enable = '0' then
+                counter <= counter;
+            else
+                if Load = '1' then
+                    counter <= unsigned(Data);
+                    
+                else
+                    if Up_Down = '1' then
+                        counter <= counter +1;
+                    else
+                        counter <= counter - 1;
+                        
+                    end if;
+                end if;
+             end if;
+          end if;
+          
+      end process;
+      Q <= std_logic_vector(counter(7 downto 0)); ---after the process is finished the variable is assigned to output
+      end architecture;
+
+
+
+
+
+
+////
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity rotator is port (
+    rotateleft, enable : in std_logic;
+    N : in std_logic_vector (1 downto 0);
+    D_in : in std_logic_vector (3 downto 0);
+    D_out : out std_logic_vector (3 downto 0)
+);
+
+end entity rotator;
+
+
+architecture arch of rotator is
+begin 
+process(rotateleft,enable,D_in,N)
+begin
+    if (enable = '0') then
+    D_out <= D_in;
+    end if;
+    
+    if (enable = '1') then
+        if (rotateleft = '1') then
+            --caseleri görelim // syntaxý bu
+            case N is
+                when "00" =>
+                    D_out <= D_in;
+                when "01" =>
+                    D_out <= D_in(2 downto 0) & D_in(3);
+                when "10" =>
+                    D_out <= D_in(1 downto 0) & D_in (3 downto 2);
+                when "11" =>
+                    D_out <= D_in(0) & D_in (3 downto 1);
+                when others =>
+                    D_out <= "XXXX"; --xlerin büyük olmasý lazým
+            end case;
+        end if;            
+        if (rotateleft = '0') then
+            case N is
+                when "00" =>
+                    D_out <= D_in;
+                when "01" =>
+                    D_out <= D_in(0) & D_in (3 downto 1);
+                when "10" =>
+                    D_out <= D_in(1 downto 0) & D_in(3 downto 2);
+                when "11" =>
+                    D_out <= D_in (2 downto 0) & D_in(3);
+                when others =>
+                    D_out <= "XXXX";
+            end case;
+        end if;   
+    end if;
+end process;
+end architecture arch;
+
+
+/////
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity controller is port (
+        Crystal, nSysReset : in std_logic;
+        Buttons : in std_logic_vector (1 downto 0);
+        watchrunning, watchreset : out std_logic
+);
+end entity;
+
+architecture behavior of controller is
+type statetype is (zero,start,running,stop,stopped,reset,dummy7,dummy8);  -- defined states.
+signal state, next_state : statetype;
+begin
+    cycle: process (Crystal,nSysReset) -- defined how will the state machine transition work.
+    begin
+        if nSysReset = '0' then
+            state <= zero;
+        elsif rising_edge(Crystal) then
+            state <= next_state;
+        end if;
+    end process cycle;
+    
+    state_machine: process (state,Buttons) -- defined what will happen in the state machine
+    begin
+        --initially next_state o anki state
+        next_state <= state;
+        case state is
+            when zero => 
+                watchrunning <= '0' ;
+                watchreset <= '0' ; 
+                if Buttons(1) = '1' then 
+                    next_state <= start;
+                end if;
+            when start => 
+                watchrunning <= '1' ;
+                watchreset <= '0' ; 
+                if Buttons = "00" then
+                    next_state <= running;
+                end if;
+            when running => 
+                watchrunning <= '1' ;
+                watchreset <= '0' ; 
+                if Buttons(1) = '1' then
+                    next_state <= stop;
+                end if;
+            when stop => 
+                watchrunning <= '0' ;
+                watchreset <= '0' ; 
+                if Buttons = "00" then
+                    next_state <= stopped;
+                end if;    
+            when stopped => 
+                watchrunning <= '0' ;
+                watchreset <= '0' ; 
+                if Buttons(1) = '1' then
+                    next_state <= start;
+                elsif Buttons = "01" then
+                    next_state <= reset;
+                end if;                
+            when reset => 
+                watchrunning <= '0' ;
+                watchreset <= '1' ; 
+                if Buttons = "00" then
+                    next_state <= zero;
+                end if;
+            when others =>
+                watchrunning <= '0';
+                watchreset <= '0';
+                next_state <= zero;
+            end case;
+        end process state_machine;
+end architecture;
+
+
+CALCULATOR TOP:
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+
+
+entity top_another_implement is
+generic(
+    clks_per_bit : integer := 1737
+);
+
+port (
+    clk: in std_logic;
+    data_in : in std_logic;
+    data_out: out std_logic;
+    led1 : out std_logic
+);
+
+end entity;
+
+
+architecture behavior of top_another_implement is 
+-----------------------------------------------
+--add ip component descriptions here:
+COMPONENT add
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_a_tvalid : IN STD_LOGIC;
+    s_axis_a_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    s_axis_b_tvalid : IN STD_LOGIC;
+    s_axis_b_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_result_tvalid : OUT STD_LOGIC;
+    m_axis_result_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+  );
+END COMPONENT;
+
+
+COMPONENT divide
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_a_tvalid : IN STD_LOGIC;
+    s_axis_a_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    s_axis_b_tvalid : IN STD_LOGIC;
+    s_axis_b_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_result_tvalid : OUT STD_LOGIC;
+    m_axis_result_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+  );
+END COMPONENT;
+
+
+COMPONENT multiply
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_a_tvalid : IN STD_LOGIC;
+    s_axis_a_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    s_axis_b_tvalid : IN STD_LOGIC;
+    s_axis_b_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_result_tvalid : OUT STD_LOGIC;
+    m_axis_result_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+  );
+END COMPONENT;
+
+COMPONENT substract
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_a_tvalid : IN STD_LOGIC;
+    s_axis_a_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    s_axis_b_tvalid : IN STD_LOGIC;
+    s_axis_b_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_result_tvalid : OUT STD_LOGIC;
+    m_axis_result_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+  );
+END COMPONENT;
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------- ip finished    
+   
+    type statetype is (ask_input1,take_input1,write_to_reg1,ask_input2,take_input2,write_to_reg2,ask_operation,take_operation,operation_to_reg,compute_check,op_add,op_substract,op_multiply,op_divide,output_to_reg,load,count,stop); --sendi   kard m
+    type reg_holder is array (0 to 3) of std_logic_vector(7 downto 0);
+    type computed_output_holder is array (0 to 3) of std_logic_vector (7 downto 0);
+    signal state: statetype:= ask_input1;
+    signal reg_8: reg_holder;
+    signal computed_output_8: computed_output_holder;
+    
+    signal ascii_counter: std_logic_vector (2 downto 0);
+    signal reg_counter: integer := 0;
+    signal output_reg_counter : integer := 0;
+    signal number1_reg: std_logic_vector (31 downto 0) := (others =>'0');
+    signal number2_reg: std_logic_vector (31 downto 0) := (others =>'0');
+    signal compute_reg: std_logic_vector (7 downto 0) := (others => '0');
+
+    signal stop_check : std_logic;
+    signal ask_inp1,ask_inp2,ask_op : std_logic;
+    signal ask_inp: std_logic;
+    signal tx_serial_output : std_logic := '0';
+    signal data_from_pc : std_logic_vector (7 downto 0) := (others =>'0');
+    signal serial_output : std_logic := '0';
+    signal tx_busy_wire : std_logic :='0';
+    signal receiver_finish : std_logic;
+    signal ascii_to_transmitter : std_logic_vector (7 downto 0);
+    signal transmit_for_tx: std_logic;
+    signal serial_to_pc1,tx_busy_to_pc: std_logic;
+    signal tx_busy_pc : std_logic;
+    signal serial_to_pc2: std_logic;
+    signal asci_or_pc_or_calc: std_logic_vector (1 downto 0);
+    signal serial_to_pc : std_logic;
+    
+    signal s_axis_a_tvalida: std_logic;
+    signal s_axis_b_tvalida: std_logic;
+    
+    signal s_axis_a_tvalids: std_logic;
+    signal s_axis_b_tvalids: std_logic;
+    
+    signal s_axis_a_tvalidd: std_logic;
+    signal s_axis_b_tvalidd: std_logic;
+    
+    signal s_axis_a_tvalidm: std_logic;
+    signal s_axis_b_tvalidm: std_logic;
+    
+    signal m_axis_result_tvalida: std_logic;
+    signal m_axis_result_tdataa : std_logic_vector (31 downto 0);
+   
+    signal m_axis_result_tvalids: std_logic;
+    signal m_axis_result_tdatas : std_logic_vector (31 downto 0);
+    
+    signal m_axis_result_tvalidd: std_logic;
+    signal m_axis_result_tdatad : std_logic_vector (31 downto 0);
+    
+    signal m_axis_result_tvalidm: std_logic;
+    signal m_axis_result_tdatam : std_logic_vector (31 downto 0);
+    
+    signal computed_output : std_logic_vector (31 downto 0);
+    
+    signal serial_to_pc3: std_logic := '0';
+    signal tx_busy_computer:std_logic := '0';
+    signal result_calc: std_logic_vector (7 downto 0) := (others => '0');
+    signal start_for_result: std_logic := '0' ;
+    
+    --signal number_to_op1,number_to_op2: std_logic_vector (31 downto 0) := (others =>'0');
+begin
+    my_adder : add
+  PORT MAP (
+    aclk => clk,
+    s_axis_a_tvalid => s_axis_a_tvalida,
+    s_axis_a_tdata => number1_reg,
+    s_axis_b_tvalid => s_axis_b_tvalida,
+    s_axis_b_tdata => number2_reg,
+    m_axis_result_tvalid => m_axis_result_tvalida,
+    m_axis_result_tdata => m_axis_result_tdataa
+  );
+    
+    my_substractor : substract
+  PORT MAP (
+    aclk => clk,
+    s_axis_a_tvalid => s_axis_a_tvalids,
+    s_axis_a_tdata => number1_reg,
+    s_axis_b_tvalid => s_axis_b_tvalids,
+    s_axis_b_tdata => number2_reg,
+    m_axis_result_tvalid => m_axis_result_tvalids,
+    m_axis_result_tdata => m_axis_result_tdatas
+  );
+    
+    my_divider : divide
+  PORT MAP (
+    aclk => clk,
+    s_axis_a_tvalid => s_axis_a_tvalidd,
+    s_axis_a_tdata => number1_reg,
+    s_axis_b_tvalid => s_axis_b_tvalidd,
+    s_axis_b_tdata => number2_reg,
+    m_axis_result_tvalid => m_axis_result_tvalidd,
+    m_axis_result_tdata => m_axis_result_tdatad
+  );
+  
+  
+    my_multiplier : multiply
+  PORT MAP (
+    aclk => clk,
+    s_axis_a_tvalid =>s_axis_a_tvalidm,
+    s_axis_a_tdata => number1_reg,
+    s_axis_b_tvalid => s_axis_b_tvalidm,
+    s_axis_b_tdata => number2_reg,
+    m_axis_result_tvalid => m_axis_result_tvalidm,
+    m_axis_result_tdata => m_axis_result_tdatam
+  );
+    
+    ascii: entity work.menu_trial(behavior) port map(
+        clk => clk,
+        ask_inp => ask_inp,
+        ask_inp1 => ask_inp1,
+        ask_inp2 => ask_inp2,
+        busy => tx_busy_wire,
+        transmit => transmit_for_tx, --idea: use this to send output ascii to transmitter
+        ascii_out => ascii_to_transmitter,
+        stop_check => stop_check
+    );
+    --take opening text to pc
+    tx_to_pc_ascii: entity work.tx(behavior) port map(
+        clk =>clk,
+        data_in => ascii_to_transmitter,
+        start_transmit => transmit_for_tx,
+        transmit_out => serial_to_pc1,
+        tx_busy => tx_busy_wire
+    );
+    --take input from pc
+    rx_from_pc: entity work.rx(behavior) port map (
+        clk => clk,
+        receiver_input => data_in,
+        receiver_output => data_from_pc,
+        receiver_finish => receiver_finish
+        );   
+    
+        
+     tx_to_pc_data: entity work.tx(behavior) port map(
+        clk=>clk,
+        data_in => data_from_pc,
+        start_transmit => receiver_finish,
+        transmit_out => serial_to_pc2,
+        tx_busy => tx_busy_pc
+     ); 
+     tx_to_pc_result: entity work.tx(behavior) port map(
+        clk => clk,
+        data_in => result_calc,
+        start_transmit => start_for_result,
+        transmit_out =>serial_to_pc3,
+        tx_busy => tx_busy_computer
+     );
+     mux: entity work.selector(behavior) port map(
+        data_in1 => serial_to_pc1, --00
+        data_in2 => serial_to_pc2, --01
+        data_in3 => serial_to_pc3, --10
+        asci_or_pc_or_calc => asci_or_pc_or_calc,
+        data_out => serial_to_pc
+     );   
+    --top d zg n  al  m yor bak lacak    
+    process(clk)
+        begin
+            if(rising_edge(clk)) then
+                case state is
+                    when ask_input1 =>
+                        asci_or_pc_or_calc <= "00";
+                        ask_inp <= '1';
+                        ask_inp1 <= '1';
+                        ask_inp2 <= '0';
+                        --data_out <= serial_to_pc;
+                        if (stop_check = '1' )then
+                            ask_inp <= '0';
+                            state <= take_input1;
+                            
+                            end if;
+                    when take_input1 =>
+                        ask_inp <= '0';
+                        --data_out <= serial_to_pc; --to catch last bit
+                        state <= write_to_reg1;
+
+                        
+                    when write_to_reg1 =>
+                    asci_or_pc_or_calc <= "01";
+                        if(reg_counter = 3) then
+                            if(receiver_finish = '1') then
+                                reg_8(reg_counter)<= data_from_pc;                            
+                                
+                                reg_counter <= 0;
+                         
+                                state <= ask_input2;
+                            end if;
+                        else
+                            if(receiver_finish = '1') then
+                                reg_8(reg_counter)<= data_from_pc;
+                                reg_counter <= reg_counter +1;
+                            end if;
+                        end if;
+                   
+                        
+                    when ask_input2 =>
+                    number1_reg <= reg_8(3) & reg_8(2) & reg_8(1) & reg_8(0);
+                   
+                    asci_or_pc_or_calc <= "00";
+                        ask_inp <= '1';
+                        ask_inp1 <= '0';
+                        ask_inp2 <= '1';
+                        
+                        --data_out <= serial_to_pc;
+                        if (stop_check = '1')then
+                            ask_inp <= '0';
+
+                            state <= take_input2;
+                            
+                            end if;
+                     
+                     
+                    when take_input2 =>
+--,         
+                        ask_inp <= '0';
+                        --data_out <= serial_to_pc;
+                        state <= write_to_reg2;
+                        
+
+                    when write_to_reg2 =>
+                    asci_or_pc_or_calc <= "01";
+                        if(reg_counter = 3) then
+                            if(receiver_finish = '1') then
+                                reg_8(reg_counter)<= data_from_pc;
+                                
+                                reg_counter <= 0;
+
+                                state <= ask_operation;
+                            end if;
+                        else
+                            if(receiver_finish = '1') then
+                                reg_8(reg_counter)<= data_from_pc;
+                                reg_counter <= reg_counter +1;
+                            end if;
+                        end if;    
+                        
+                    when ask_operation =>
+                    asci_or_pc_or_calc <= "00";
+                    number2_reg <= reg_8(3) & reg_8(2) & reg_8(1) & reg_8(0);
+                        ask_inp <= '1';
+                        ask_inp1 <= '1';
+                        ask_inp2 <= '1';
+                        
+                        --data_out <= serial_to_pc;
+                        if (stop_check = '1')then
+                            ask_inp <= '0';
+
+                            state <= take_operation;
+                            end if;
+                    when take_operation =>
+                        ask_inp <= '0';                     
+                        --data_out<= serial_to_pc_mirror;
+                        state <= operation_to_reg;
+                    when operation_to_reg =>
+                        s_axis_a_tvalida <= '1'; --valid is input, ready is output :.... valid & ready = 1 =>datay  al r => result valid & ready = 1 => outputa atar
+                        s_axis_b_tvalida <= '1';
+                        s_axis_a_tvalids <= '1';
+                        s_axis_b_tvalids <= '1';
+                        s_axis_a_tvalidm <= '1';
+                        s_axis_b_tvalidm <= '1';
+                        s_axis_a_tvalidd <= '1';
+                        s_axis_b_tvalidd <= '1';
+                       -- asci_or_pc_or_calc <= "01";                        
+                        if(receiver_finish = '1') then
+                            compute_reg <= data_from_pc;
+                            state <= compute_check;
+                        end if;
+                    when compute_check =>
+
+                        if(compute_reg = x"05")then
+                            
+                            state<= op_add;
+                        elsif(compute_reg = x"2D")then
+
+                            state<= op_substract;
+                        
+                        elsif(compute_reg = x"2A")then
+                            
+                            state <= op_multiply;
+                        
+                        elsif(compute_reg = x"2F")then
+                            
+                            state <= op_divide;
+                        else
+                            state <= ask_operation;
+                        end if;
+                        
+                    when op_add =>
+                        if (m_axis_result_tvalida = '1') then
+                            computed_output <= m_axis_result_tdataa;
+                            if(m_axis_result_tdataa = x"418a5005")then --- SONUCUM DO RU DE  L BURAYA BAK IP CORE CAL SMAYA BASLAD 
+                            led1 <= '1';
+                            end if;
+                            state <= output_to_reg;
+
+                        end if;
+                    when op_substract =>
+                        if (m_axis_result_tvalids = '1') then
+                            computed_output <= m_axis_result_tdatas;
+                            state <= output_to_reg;
+                        end if;
+                    when op_multiply =>
+                        if (m_axis_result_tvalidm = '1') then
+                            computed_output <= m_axis_result_tdatam;
+                            state <= output_to_reg;
+                        end if;
+                    when op_divide =>
+                        if (m_axis_result_tvalidd = '1') then
+                            computed_output <= m_axis_result_tdatad;
+                            state <= output_to_reg;
+                        end if;
+                    when output_to_reg =>
+                        computed_output_8(3)<= computed_output(31 downto 24);
+                        computed_output_8(2)<= computed_output(23 downto 16);
+                        computed_output_8(1)<= computed_output(15 downto 8);
+                        computed_output_8(0)<= computed_output(7 downto 0);
+                        state <= load;              
+                    when load =>
+                        asci_or_pc_or_calc <= "10";
+                        result_calc <= computed_output_8(output_reg_counter);
+                        if(tx_busy_computer /= '1') then
+                            start_for_result<= '1';
+                            state <= count;
+                        else
+                            state <= load;
+                        end if;
+                        
+                   -- when send =>
+                           -- start_for_result<= '1';
+                     --       state <= count;
+                     when count =>
+                            
+
+                        start_for_result <= '0';
+                            if(output_reg_counter /= 4 )then
+                                output_reg_counter <= output_reg_counter +1 ;
+                                state <= load;
+                            else
+                                if(tx_busy_computer /= '1')then 
+                                state <= stop;
+                                end if;
+                            end if;
+                    when stop =>
+                        state <= ask_input1;
+                                     
+                    end case;
+                    end if;
+                    end process;
+                    data_out <= serial_to_pc ; 
+    end architecture;
+        
+        
+TESTBENCHES:
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+
+
+
+
+entity mux_tb is
+end entity;
+
+
+
+architecture bench of mux_tb is
+    signal data_in1,data_in2,asci_or_pc,data_out : std_logic := '0';
+    begin
+        generator: entity work.selector(behavior) port map(
+                data_in1 => data_in1,
+                data_in2 => data_in2,
+                asci_or_pc => asci_or_pc,
+                data_out=> data_out
+        );
+        
+       
+        
+        
+        stim_process: process is
+        begin
+            data_in1 <= '1';
+            data_in2 <= '0';
+            asci_or_pc <= '0';
+            wait for 10 ns;
+            asci_or_pc <= '1';
+            wait for 10 ns;
+            wait;
+            
+            
+            
+        end process;
+    end architecture;
+            
+            
+
+
+
+
+
+///
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+
+
+
+
+entity rx_tb is
+end entity;
+
+
+
+
+architecture bench of rx_tb is
+    signal clk,receiver_input,receiver_finish : std_logic := '0';
+    signal receiver_output: std_logic_vector (7 downto 0) := (others =>'0');
+    constant clk_period: time := 5 ns;
+    begin
+            my_rx: entity work.rx(behavior) port map(
+                clk => clk,
+                receiver_input => receiver_input,
+                receiver_output=>receiver_output,
+                receiver_finish => receiver_finish
+            );
+        
+        
+     clk_process: process is
+        begin
+        clk <= '0';
+        wait for clk_period /2;
+        clk <= '1';
+        wait for clk_period /2;
+        end process;    
+      
+     stim_process: process is
+        begin
+            receiver_input <= '1';
+            wait for 100 * clk_period;
+            receiver_input <= '0';
+            wait for clk_period;
+            receiver_input <= '1';
+            wait for clk_period;
+            receiver_input <= '1';
+            wait for clk_period;
+            receiver_input <= '0';
+            wait for clk_period;
+            receiver_input <= '0';
+            wait for clk_period;
+            receiver_input <= '1';
+            wait for clk_period;
+            receiver_input <= '1';
+            wait for clk_period;
+            receiver_input <= '0';
+            wait for clk_period;
+            receiver_input <= '0';
+            wait for clk_period;
+            receiver_input <= '1';
+            wait for clk_period;
+            
+            wait;
+            
+        end process;
+    end architecture;
+            
+            
+
+/////
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+
+
+
+
+entity tx_tb is
+end entity;
+
+
+
+
+architecture bench of tx_tb is
+    signal clk,start_transmit,transmit_out,tx_busy : std_logic := '0';
+    signal data_in : std_logic_vector (7 downto 0) := (others => '0');
+    constant clk_period: time := 5 ns;
+    begin
+            my_tx: entity work.tx(behavior) port map(
+                clk => clk,
+                data_in => data_in,
+                start_transmit=>start_transmit,
+                transmit_out => transmit_out,
+                tx_busy => tx_busy
+            );
+        
+        
+     clk_process: process is
+        begin
+        clk <= '0';
+        wait for clk_period /2;
+        clk <= '1';
+        wait for clk_period /2;
+        end process;    
+      
+     stim_process: process is
+        begin
+            data_in <= "10010011";
+            start_transmit <= '0';
+            
+            wait for clk_period *100;
+            
+            start_transmit <= '1';
+            wait for clk_period;
+            start_transmit <= '0';
+            wait for clk_period ;
+            wait;
+            
+        end process;
+    end architecture;
+            
+            
+
+////
+
+
+library ieee;
+use ieee.std_logic_1164.all;
+
+
+
+
+
+entity asci_tb is
+end entity;
+
+
+
+architecture bench of asci_tb is
+    signal clk: std_logic := '0';
+    signal ask_inp,ask_inp1,ask_inp2: std_logic:= '0';
+    signal busy : std_logic := '0';
+    signal transmit: std_logic := '0';
+    signal stop_check : std_logic := '0';
+    signal ascii_out : std_logic_vector (7 downto 0) := (others =>'0');
+    constant clk_period : time := 5 ns;
+    begin
+        generator: entity work.menu_trial(behavior) port map(
+                clk => clk,
+                ask_inp => ask_inp,
+                ask_inp1 =>ask_inp1,
+                ask_inp2 => ask_inp2,
+                busy => busy,
+                transmit=> transmit,
+                stop_check => stop_check,
+                ascii_out =>  ascii_out
+        );
+        
+        
+        clk_process: process is
+        begin
+        clk <= '0';
+        wait for clk_period /2;
+        clk <= '1';
+        wait for clk_period /2;
+        end process;
+        
+        
+        stim_process: process is
+        begin
+            ask_inp <= '1';
+            ask_inp1 <= '1';
+            ask_inp2 <= '0';
+            busy <= '1';
+            wait for clk_period *10;
+            busy <= '0';
+            wait for clk_period;
+            wait;
+            
+            
+        end process;
+    end architecture;
+            
+            
+
